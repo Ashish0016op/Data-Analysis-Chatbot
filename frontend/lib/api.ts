@@ -354,6 +354,22 @@ export async function getDatasetInfo() {
   return apiRequest('/dataset-info')
 }
 
+export interface DatasetColumnSchemaInput {
+  field: string
+  description: string
+}
+
+export async function uploadDataset(file: File, schema: DatasetColumnSchemaInput[]) {
+  const form = new FormData()
+  form.set('file', file)
+  form.set('schema_json', JSON.stringify(schema))
+
+  return apiRequest('/datasets/upload', {
+    method: 'POST',
+    body: form,
+  })
+}
+
 export function extractArray<T = JsonRecord>(payload: unknown, keys: string[] = []) {
   if (Array.isArray(payload)) return payload as T[]
   if (!payload || typeof payload !== 'object') return []

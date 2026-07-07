@@ -3,13 +3,14 @@ matplotlib.use('Agg')  # CRITICAL: Must be before any other matplotlib/pyplot im
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-from fastapi import FastAPI, HTTPException, Depends, status, APIRouter
+from fastapi import FastAPI, HTTPException, Depends, status, APIRouter, UploadFile, File, Form
 from pydantic import BaseModel, Field, field_validator
 from typing import Dict, List, Literal
 from datetime import datetime, timedelta
 import jwt
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 import pandas as pd
+import numpy as np
 import os
 from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -36,6 +37,7 @@ from db import (
     ensure_mongo_schema,
     get_mongo_status,
     ping_mongo,
+    datasets_collection,
     users_collection,
 )
 
@@ -194,9 +196,13 @@ app.add_middleware(
 )
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-CSV_FILE_PATH  = os.path.join(BASE_DIR, "Warranty-Aperture for After 2025.csv")
+DEFAULT_CSV_FILE_PATH = os.path.join(BASE_DIR, "Warranty-Aperture for After 2025.csv")
+CSV_FILE_PATH = DEFAULT_CSV_FILE_PATH
+ACTIVE_DATASET_ID = None
+UPLOADS_FOLDER = os.path.join(BASE_DIR, "uploads")
 IMAGES_FOLDER  = os.path.join(BASE_DIR, "images")
 os.makedirs(IMAGES_FOLDER, exist_ok=True)
+os.makedirs(UPLOADS_FOLDER, exist_ok=True)
 
 
 # ─────────────────────────────────────────────
@@ -352,17 +358,18 @@ def empty_folder(folder_path: str):
 # Data Loading & Conversion
 # ─────────────────────────────────────────────
 
-def robust_dataframe_conversion(df: pd.DataFrame) -> pd.DataFrame:
+def robust_dataframe_conversion(df: pd.DataFrame, schema: list = None) -> pd.DataFrame:
     df = df.copy()
+    active_schema = schema if schema is not None else DATA_SCHEMA
     for col in df.columns:
         try:
             df[col] = pd.to_numeric(df[col], errors='ignore')
         except Exception:
             pass
 
-    for schema_field in DATA_SCHEMA:
-        col_name      = schema_field['field']
-        expected_type = schema_field['type']
+    for schema_field in active_schema:
+        col_name      = schema_field.get('field')
+        expected_type = str(schema_field.get('type', 'string')).lower()
         if col_name not in df.columns:
             continue
         try:
@@ -381,11 +388,88 @@ def robust_dataframe_conversion(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def read_csv_file(file_path_or_buffer) -> pd.DataFrame:
+    last_error = None
+    for encoding in ("utf-8-sig", "utf-8", "ISO-8859-1"):
+        try:
+            return pd.read_csv(
+                file_path_or_buffer,
+                encoding=encoding,
+                low_memory=False,
+                dtype_backend='pyarrow',
+            )
+        except UnicodeDecodeError as exc:
+            last_error = exc
+            if hasattr(file_path_or_buffer, "seek"):
+                file_path_or_buffer.seek(0)
+        except Exception:
+            if hasattr(file_path_or_buffer, "seek"):
+                file_path_or_buffer.seek(0)
+            raise
+
+    raise last_error or ValueError("Unable to read CSV file.")
+
+
+def sanitize_filename(filename: str) -> str:
+    name = os.path.basename(filename or "dataset.csv")
+    name = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._")
+    return name or "dataset.csv"
+
+
+def infer_schema_type(series: pd.Series) -> str:
+    non_null = series.dropna()
+    if non_null.empty:
+        return "string"
+
+    numeric = pd.to_numeric(non_null, errors="coerce")
+    numeric_ratio = float(numeric.notna().mean())
+    if numeric_ratio >= 0.9:
+        numeric_values = numeric.dropna().astype("float64").to_numpy()
+        if numeric_values.size > 0 and np.all(np.isclose(numeric_values, np.round(numeric_values))):
+            return "integer"
+        return "float"
+
+    parsed_dates = pd.to_datetime(non_null, errors="coerce")
+    if float(parsed_dates.notna().mean()) >= 0.8:
+        return "date"
+
+    return "string"
+
+
+def build_dataset_schema(df: pd.DataFrame, submitted_schema: list) -> list:
+    descriptions = {}
+    for item in submitted_schema:
+        if not isinstance(item, dict):
+            continue
+        field = str(item.get("field", "")).strip()
+        if field:
+            descriptions[field] = str(item.get("description", "")).strip()
+
+    schema = []
+    for column in df.columns:
+        series = df[column]
+        sample_values = series.dropna().head(1).tolist()
+        try:
+            inferred_type = infer_schema_type(series)
+        except Exception as exc:
+            print(f"Warning: Could not infer schema type for {column}: {exc}")
+            inferred_type = "string"
+        schema.append({
+            "field": str(column),
+            "description": descriptions.get(str(column)) or f"No description provided for {column}.",
+            "type": inferred_type,
+            "example": to_jsonable_value(sample_values[0]) if sample_values else None,
+            "Importance": "MEDIUM",
+        })
+
+    return schema
+
+
 def load_data():
     global DATA
     if os.path.exists(CSV_FILE_PATH):
         try:
-            df   = pd.read_csv(CSV_FILE_PATH, encoding="ISO-8859-1", low_memory=False, dtype_backend='pyarrow')
+            df   = read_csv_file(CSV_FILE_PATH)
             DATA = robust_dataframe_conversion(df)
             print(f"Dataset loaded. Shape: {DATA.shape}")
             print("Columns:", list(DATA.columns))
@@ -398,6 +482,45 @@ def load_data():
     else:
         print("Error: CSV file not found.")
         return False
+
+
+def load_dataframe_from_path(file_path: str, schema: list) -> pd.DataFrame:
+    df = read_csv_file(file_path)
+    return robust_dataframe_conversion(df, schema)
+
+
+async def get_user_active_dataset_context(current_user: dict) -> dict:
+    try:
+        dataset = await datasets_collection.find_one(
+            {"uploaded_by": current_user["email"], "is_active": True},
+            sort=[("updated_at", -1)],
+        )
+    except PyMongoError as exc:
+        raise HTTPException(status_code=503, detail=f"MongoDB is unavailable: {exc}")
+
+    if not dataset:
+        raise HTTPException(
+            status_code=404,
+            detail="No dataset uploaded for this user. Please upload a CSV dataset first.",
+        )
+
+    file_path = dataset.get("file_path")
+    schema = dataset.get("schema")
+    if not file_path or not os.path.exists(file_path) or not isinstance(schema, list):
+        raise HTTPException(status_code=404, detail="Uploaded dataset file is missing or invalid.")
+
+    try:
+        df = load_dataframe_from_path(file_path, schema)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Could not load your dataset: {exc}")
+
+    return {
+        "dataset_id": str(dataset.get("_id")),
+        "filename": dataset.get("original_filename") or os.path.basename(file_path),
+        "file_path": file_path,
+        "schema": schema,
+        "df": df,
+    }
 
 
 # ─────────────────────────────────────────────
@@ -435,20 +558,23 @@ def dataframe_to_html_table(df: pd.DataFrame) -> str:
 
 
 def to_jsonable_value(value):
+    if isinstance(value, (pd.Timestamp, datetime)):
+        return value.isoformat()
+
+    if hasattr(value, "item"):
+        try:
+            value = value.item()
+        except (TypeError, ValueError):
+            pass
+
     try:
         if pd.isna(value):
             return None
     except (TypeError, ValueError):
         pass
 
-    if isinstance(value, (pd.Timestamp, datetime)):
-        return value.isoformat()
-
-    if hasattr(value, "item"):
-        try:
-            return value.item()
-        except (TypeError, ValueError):
-            pass
+    if isinstance(value, float) and not np.isfinite(value):
+        return None
 
     return value
 
@@ -1045,15 +1171,119 @@ async def rate_limit_status(current_user: dict = Depends(get_current_user)):
     }
 
 
+@data_router.post("/datasets/upload", status_code=status.HTTP_201_CREATED)
+async def upload_dataset(
+    file: UploadFile = File(...),
+    schema_json: str = Form(...),
+    current_user: dict = Depends(get_current_user),
+):
+    global CHAT_HISTORY
+
+    original_filename = file.filename or "dataset.csv"
+    if os.path.splitext(original_filename)[1].lower() != ".csv":
+        raise HTTPException(status_code=400, detail="Only CSV files are supported.")
+
+    try:
+        submitted_schema = json.loads(schema_json)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=422, detail="schema_json must be valid JSON.")
+
+    if not isinstance(submitted_schema, list):
+        raise HTTPException(status_code=422, detail="schema_json must be a list of column definitions.")
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Uploaded CSV file is empty.")
+
+    try:
+        uploaded_df = read_csv_file(io.BytesIO(content))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Could not read CSV file: {exc}")
+
+    if uploaded_df.empty or len(uploaded_df.columns) == 0:
+        raise HTTPException(status_code=400, detail="CSV must contain at least one row and one column.")
+
+    descriptions = {
+        str(item.get("field", "")).strip(): str(item.get("description", "")).strip()
+        for item in submitted_schema
+        if isinstance(item, dict)
+    }
+    missing_descriptions = [
+        str(column)
+        for column in uploaded_df.columns
+        if not descriptions.get(str(column))
+    ]
+    if missing_descriptions:
+        preview = ", ".join(missing_descriptions[:5])
+        extra = f" and {len(missing_descriptions) - 5} more" if len(missing_descriptions) > 5 else ""
+        raise HTTPException(
+            status_code=422,
+            detail=f"Add descriptions for every column. Missing: {preview}{extra}",
+        )
+
+    schema = build_dataset_schema(uploaded_df, submitted_schema)
+    now = datetime.utcnow()
+    safe_name = sanitize_filename(original_filename)
+    archived_filename = f"{now.strftime('%Y%m%d%H%M%S')}_{secrets.token_hex(4)}_{safe_name}"
+    archived_path = os.path.join(UPLOADS_FOLDER, archived_filename)
+    active_csv_path = DEFAULT_CSV_FILE_PATH
+
+    with open(active_csv_path, "wb") as output_file:
+        output_file.write(content)
+
+    with open(archived_path, "wb") as output_file:
+        output_file.write(content)
+
+    dataset_doc = {
+        "filename": os.path.basename(active_csv_path),
+        "original_filename": original_filename,
+        "file_path": archived_path,
+        "active_file_path": active_csv_path,
+        "schema": schema,
+        "uploaded_by": current_user["email"],
+        "is_active": True,
+        "row_count": int(len(uploaded_df)),
+        "column_count": int(len(uploaded_df.columns)),
+        "created_at": now,
+        "updated_at": now,
+    }
+
+    try:
+        await datasets_collection.update_many(
+            {"uploaded_by": current_user["email"], "is_active": True},
+            {"$set": {"is_active": False, "updated_at": now}},
+        )
+        insert_result = await datasets_collection.insert_one(dataset_doc)
+    except PyMongoError as exc:
+        try:
+            os.remove(archived_path)
+        except OSError:
+            pass
+        raise HTTPException(status_code=503, detail=f"MongoDB is unavailable: {exc}")
+
+    active_dataset_id = str(insert_result.inserted_id)
+    uploaded_data = robust_dataframe_conversion(uploaded_df, schema)
+    CHAT_HISTORY = [entry for entry in CHAT_HISTORY if entry.get("user") != current_user["email"]]
+    empty_folder(IMAGES_FOLDER)
+
+    return {
+        "message": "Dataset uploaded successfully.",
+        "dataset_id": active_dataset_id,
+        "dataset_filename": original_filename,
+        "stored_filename": os.path.basename(active_csv_path),
+        "active_file_path": active_csv_path,
+        "archived_file_path": archived_path,
+        "total_rows": int(len(uploaded_data)),
+        "total_columns": int(len(uploaded_data.columns)),
+        "schema": schema,
+    }
+
+
 @data_router.get("/dataset-info")
 async def dataset_info(current_user: dict = Depends(get_current_user)):
-    global DATA
-
-    if DATA is None:
-        if not load_data():
-            raise HTTPException(status_code=400, detail="No data loaded.")
-
-    df = DATA
+    dataset_context = await get_user_active_dataset_context(current_user)
+    df = dataset_context["df"]
+    schema = dataset_context["schema"]
     total_rows = int(len(df))
     total_columns = int(len(df.columns))
     missing_values = {
@@ -1061,14 +1291,22 @@ async def dataset_info(current_user: dict = Depends(get_current_user)):
         for column in df.columns
     }
     column_details = []
+    schema_by_column = {
+        str(item.get("field")): item
+        for item in schema
+        if isinstance(item, dict) and item.get("field") is not None
+    }
 
     for column in df.columns:
         series = df[column]
         null_count = int(series.isna().sum())
         non_null_count = int(series.notna().sum())
+        schema_item = schema_by_column.get(str(column), {})
         detail = {
             "column_name": str(column),
             "dtype": str(series.dtype),
+            "schema_type": schema_item.get("type"),
+            "description": schema_item.get("description"),
             "non_null_count": non_null_count,
             "null_count": null_count,
             "null_percentage": round((null_count / total_rows * 100), 2) if total_rows else 0,
@@ -1089,8 +1327,9 @@ async def dataset_info(current_user: dict = Depends(get_current_user)):
                 "std": numeric.std(),
             }
             for key, value in stats.items():
-                if pd.notna(value):
-                    detail[key] = float(value)
+                json_value = to_jsonable_value(value)
+                if json_value is not None:
+                    detail[key] = json_value
 
         column_details.append(detail)
 
@@ -1101,9 +1340,11 @@ async def dataset_info(current_user: dict = Depends(get_current_user)):
 
     return {
         "total_datasets": 1,
-        "dataset_filename": os.path.basename(CSV_FILE_PATH),
+        "dataset_id": dataset_context["dataset_id"],
+        "dataset_filename": dataset_context["filename"],
         "total_rows": total_rows,
         "total_columns": total_columns,
+        "schema": schema,
         "column_details": column_details,
         "missing_values": missing_values,
         "sample_data": sample_data,
@@ -1118,11 +1359,10 @@ async def dataset_info(current_user: dict = Depends(get_current_user)):
 
 @data_router.post("/query/")
 async def query_data(request: QueryRequest, current_user: dict = Depends(get_current_user)):
-    global DATA, CHAT_HISTORY
+    global CHAT_HISTORY
 
-    if DATA is None:
-        if not load_data():
-            raise HTTPException(status_code=400, detail="No data loaded.")
+    dataset_context = await get_user_active_dataset_context(current_user)
+    df = dataset_context["df"]
 
     query = request.query
     query_lower = query.lower()
@@ -1146,7 +1386,10 @@ async def query_data(request: QueryRequest, current_user: dict = Depends(get_cur
         'scatter', 'visualize', 'visualise', 'show chart', 'draw'
     ])
 
-    print(f"Query | user={current_user['email']} role={current_user['role']}")
+    print(
+        f"Query | user={current_user['email']} role={current_user['role']} "
+        f"dataset={dataset_context['dataset_id']}"
+    )
     print(
         f"Flags | table={is_table_request} list={is_list_request} "
         f"time={is_time_comparison} chart={is_chart_request}"
@@ -1172,7 +1415,7 @@ async def query_data(request: QueryRequest, current_user: dict = Depends(get_cur
             resp["html_content"] = html_content
         return resp
 
-    top_complaints_result = build_top_complaints_by_cost_table(query, DATA)
+    top_complaints_result = build_top_complaints_by_cost_table(query, df)
     if top_complaints_result is not None and not is_chart_request:
         text_summary, result_df = top_complaints_result
         html_table = dataframe_to_html_table(result_df)
@@ -1189,7 +1432,7 @@ async def query_data(request: QueryRequest, current_user: dict = Depends(get_cur
     if is_chart_request:
         print("[Chart] Bypassing agent — direct code execution")
         empty_folder(IMAGES_FOLDER)
-        success, summary = generate_chart_directly(query, DATA, IMAGES_FOLDER)
+        success, summary = generate_chart_directly(query, df, IMAGES_FOLDER)
         if success:
             CHAT_HISTORY.append({"query": query, "response": summary, "user": current_user["email"]})
             if len(CHAT_HISTORY) > MAX_HISTORY_LENGTH:
@@ -1201,7 +1444,7 @@ async def query_data(request: QueryRequest, current_user: dict = Depends(get_cur
     # NON-CHART PATH — direct code execution
     # ─────────────────────────────────────────────
     try:
-        success, result_val, stdout = generate_query_directly(query, DATA)
+        success, result_val, stdout = generate_query_directly(query, df)
         if success:
             response_text = summarize_query_result(query, result_val)
         else:

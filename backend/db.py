@@ -22,6 +22,7 @@ client = AsyncMongoClient(
 db = client[MONGO_DB_NAME]
 
 users_collection = db["users"]
+datasets_collection = db["datasets"]
 
 USER_COLLECTION_SCHEMA = {
     "$jsonSchema": {
@@ -53,6 +54,51 @@ USER_COLLECTION_SCHEMA = {
                 "bsonType": "date",
                 "description": "UTC date when the user was last updated.",
             },
+        },
+    }
+}
+
+DATASET_COLLECTION_SCHEMA = {
+    "$jsonSchema": {
+        "bsonType": "object",
+        "required": [
+            "filename",
+            "original_filename",
+            "file_path",
+            "schema",
+            "uploaded_by",
+            "is_active",
+            "row_count",
+            "column_count",
+            "created_at",
+            "updated_at",
+        ],
+        "additionalProperties": True,
+        "properties": {
+            "filename": {"bsonType": "string"},
+            "original_filename": {"bsonType": "string"},
+            "file_path": {"bsonType": "string"},
+            "uploaded_by": {"bsonType": "string"},
+            "is_active": {"bsonType": "bool"},
+            "row_count": {"bsonType": ["int", "long"]},
+            "column_count": {"bsonType": ["int", "long"]},
+            "schema": {
+                "bsonType": "array",
+                "items": {
+                    "bsonType": "object",
+                    "required": ["field", "description", "type"],
+                    "additionalProperties": True,
+                    "properties": {
+                        "field": {"bsonType": "string"},
+                        "description": {"bsonType": "string"},
+                        "type": {"enum": ["string", "integer", "float", "date"]},
+                        "example": {},
+                        "Importance": {"bsonType": "string"},
+                    },
+                },
+            },
+            "created_at": {"bsonType": "date"},
+            "updated_at": {"bsonType": "date"},
         },
     }
 }
@@ -113,7 +159,28 @@ async def ensure_mongo_schema() -> None:
         unique=True,
         partialFilterExpression={"email": {"$type": "string"}},
     )
-    print("MongoDB users schema and indexes are ready.")
+
+    if "datasets" not in collection_names:
+        await db.create_collection(
+            "datasets",
+            validator=DATASET_COLLECTION_SCHEMA,
+            validationLevel="strict",
+            validationAction="error",
+        )
+    else:
+        await db.command(
+            {
+                "collMod": "datasets",
+                "validator": DATASET_COLLECTION_SCHEMA,
+                "validationLevel": "strict",
+                "validationAction": "error",
+            }
+        )
+
+    await datasets_collection.create_index([("uploaded_by", 1), ("is_active", 1), ("updated_at", -1)])
+    await datasets_collection.create_index([("is_active", 1), ("updated_at", -1)])
+    await datasets_collection.create_index("uploaded_by")
+    print("MongoDB users and datasets schemas are ready.")
 
 
 async def close_mongo_connection() -> None:

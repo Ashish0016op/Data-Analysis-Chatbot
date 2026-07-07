@@ -19,6 +19,8 @@ import { getDatasetInfo, queryBackend } from '@/lib/api'
 interface ColumnDetail {
   column_name: string
   dtype: string
+  schema_type?: string
+  description?: string
   non_null_count: number
   null_count: number
   null_percentage: number
@@ -80,6 +82,8 @@ export default function Datasets() {
     }
 
     void fetchInfo()
+    window.addEventListener('dataset-uploaded', fetchInfo)
+    return () => window.removeEventListener('dataset-uploaded', fetchInfo)
   }, [])
 
   const filteredColumns = useMemo(() => {
@@ -179,11 +183,12 @@ export default function Datasets() {
               </div>
 
               <div className="max-h-[540px] overflow-auto">
-                <table className="w-full min-w-[760px] text-left text-xs">
+                <table className="w-full min-w-[940px] text-left text-xs">
                   <thead className="sticky top-0 z-10 border-b border-white/10 bg-sidebar text-muted-foreground">
                     <tr>
                       <th className="px-4 py-3 font-medium">Column</th>
                       <th className="px-4 py-3 font-medium">Type</th>
+                      <th className="px-4 py-3 font-medium">Description</th>
                       <th className="px-4 py-3 text-right font-medium">Non-null</th>
                       <th className="px-4 py-3 text-right font-medium">Nulls</th>
                       <th className="px-4 py-3 text-right font-medium">Unique</th>
@@ -196,8 +201,11 @@ export default function Datasets() {
                         <td className="px-4 py-3 font-medium text-foreground">{column.column_name}</td>
                         <td className="px-4 py-3">
                           <span className={`inline-flex rounded-full border px-2 py-1 font-mono text-[11px] ${getTypeTone(column.dtype)}`}>
-                            {column.dtype}
+                            {column.schema_type || column.dtype}
                           </span>
+                        </td>
+                        <td className="max-w-[320px] px-4 py-3 text-muted-foreground">
+                          <span className="line-clamp-2">{column.description || 'No description'}</span>
                         </td>
                         <td className="px-4 py-3 text-right text-foreground">{formatNumber(column.non_null_count)}</td>
                         <td className="px-4 py-3 text-right">
