@@ -11,20 +11,6 @@ export function BackendStatus() {
 
   return (
     <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-      <StatusTile
-        icon={<Server size={18} />}
-        label="Backend"
-        value={apiBaseUrl}
-        detail={status}
-        tone={error ? 'danger' : 'primary'}
-      />
-      <StatusTile
-        icon={<ShieldCheck size={18} />}
-        label="Session"
-        value={authStatus}
-        detail={token ? 'Bearer token stored' : 'Cookie/session auth supported'}
-        tone={isAuthenticated ? 'primary' : 'muted'}
-      />
       <div className="glass-card p-5 flex items-start justify-between gap-4">
         <div className="min-w-0">
           <div className="flex items-center gap-2 text-muted-foreground">
@@ -32,7 +18,6 @@ export function BackendStatus() {
             <p className="text-xs uppercase tracking-widest">User</p>
           </div>
           <p className="text-lg font-bold text-foreground mt-2 truncate">{getUserDisplayName(user)}</p>
-          <p className="text-xs text-muted-foreground mt-1">{error ?? 'Connected through API auth'}</p>
         </div>
         <button
           onClick={() => void refresh()}

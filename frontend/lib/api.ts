@@ -141,9 +141,9 @@ function tokenFromPayload(payload: unknown) {
   return typeof token === 'string' ? token : null
 }
 
-export async function login(username: string, password: string) {
+export async function login(email: string, password: string) {
   const form = new URLSearchParams()
-  form.set('username', username)
+  form.set('username', email)
   form.set('password', password)
 
   let payload: unknown
@@ -160,7 +160,7 @@ export async function login(username: string, password: string) {
 
     payload = await apiRequest('/login', {
       method: 'POST',
-      body: { username, password },
+      body: { email, password },
     })
   }
 

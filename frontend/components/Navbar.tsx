@@ -61,7 +61,6 @@ export function Navbar() {
           title="Refresh backend session"
         >
           <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />
-          {error ? 'API Offline' : isAuthenticated ? 'API Connected' : 'Sign In'}
         </button>
         {isAuthenticated && (
           <button

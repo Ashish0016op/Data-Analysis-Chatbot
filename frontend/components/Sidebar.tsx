@@ -62,30 +62,6 @@ export function Sidebar() {
           )
         })}
       </nav>
-
-      <div className="glass-card p-5 flex items-start justify-between gap-4">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2 text-muted-foreground">
-            <UserCircle size={18} />
-            <p className="text-xs uppercase tracking-widest">User</p>
-          </div>
-          <p className="text-lg font-bold text-foreground mt-2 truncate">
-            {getUserDisplayName(user)}
-          </p>
-          <p className="text-xs text-muted-foreground mt-1">
-            {error ?? 'Connected through API auth'}
-          </p>
-        </div>
-        <button
-          onClick={() => void logout()}
-          disabled={loading}
-          className="p-2 rounded-lg bg-white/5 border border-white/10 text-muted-foreground hover:text-primary hover:bg-white/10 disabled:opacity-50 transition-colors"
-          aria-label="Logout"
-          title="Logout"
-        >
-          <LogOut size={16} />
-        </button>
-      </div>
     </aside>
   )
 }

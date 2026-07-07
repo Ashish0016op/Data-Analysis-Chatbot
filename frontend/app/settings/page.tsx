@@ -14,7 +14,6 @@ export default function Settings() {
       <PageHeader
         badge="Session"
         title="Settings"
-        description="Manage your backend session and account preferences."
         actions={
           <button
             onClick={() => void refresh()}
@@ -43,17 +42,7 @@ export default function Settings() {
             : 'Sign in from the login page to access protected backend endpoints.'
         }
       >
-        {isAuthenticated ? (
           <div className="space-y-4">
-            <div className="rounded-lg border border-white/10 bg-white/5 p-4">
-              <p className="text-xs uppercase tracking-widest text-muted-foreground">Authenticated User</p>
-              <p className="text-lg font-bold text-foreground mt-1">{getUserDisplayName(user)}</p>
-              {user && (
-                <pre className="mt-3 max-h-48 overflow-auto text-xs text-muted-foreground bg-black/20 rounded p-3">
-                  {JSON.stringify(user, null, 2)}
-                </pre>
-              )}
-            </div>
             <button
               onClick={() => void logout()}
               disabled={loading}
@@ -63,17 +52,6 @@ export default function Settings() {
               Sign Out
             </button>
           </div>
-        ) : (
-          <div className="rounded-lg border border-white/10 bg-white/5 p-4 text-center">
-            <p className="text-sm text-muted-foreground">
-              You are not currently signed in. Visit the{' '}
-              <a href="/login" className="text-primary hover:underline font-medium">
-                login page
-              </a>{' '}
-              to authenticate with the backend.
-            </p>
-          </div>
-        )}
       </AnalyticsCard>
     </div>
   )

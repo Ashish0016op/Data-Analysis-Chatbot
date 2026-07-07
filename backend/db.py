@@ -23,6 +23,40 @@ db = client[MONGO_DB_NAME]
 
 users_collection = db["users"]
 
+USER_COLLECTION_SCHEMA = {
+    "$jsonSchema": {
+        "bsonType": "object",
+        "required": ["email", "password_hash", "role", "created_at", "updated_at"],
+        "additionalProperties": True,
+        "properties": {
+            "email": {
+                "bsonType": "string",
+                "minLength": 5,
+                "maxLength": 254,
+                "pattern": "^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$",
+                "description": "Unique email address used for login.",
+            },
+            "password_hash": {
+                "bsonType": "string",
+                "minLength": 20,
+                "description": "Hashed password. Never store plain-text passwords.",
+            },
+            "role": {
+                "enum": ["admin", "user"],
+                "description": "User role used for API authorization.",
+            },
+            "created_at": {
+                "bsonType": "date",
+                "description": "UTC date when the user was created.",
+            },
+            "updated_at": {
+                "bsonType": "date",
+                "description": "UTC date when the user was last updated.",
+            },
+        },
+    }
+}
+
 _mongo_status = {
     "connected": False,
     "database": MONGO_DB_NAME,
@@ -48,6 +82,38 @@ async def ping_mongo(raise_on_error: bool = True) -> bool:
 
 def get_mongo_status() -> dict:
     return _mongo_status.copy()
+
+
+async def ensure_mongo_schema() -> None:
+    collection_names = await db.list_collection_names()
+
+    if "users" not in collection_names:
+        await db.create_collection(
+            "users",
+            validator=USER_COLLECTION_SCHEMA,
+            validationLevel="strict",
+            validationAction="error",
+        )
+    else:
+        await db.command(
+            {
+                "collMod": "users",
+                "validator": USER_COLLECTION_SCHEMA,
+                "validationLevel": "strict",
+                "validationAction": "error",
+            }
+        )
+
+    index_info = await users_collection.index_information()
+    if "username_1" in index_info:
+        await users_collection.drop_index("username_1")
+
+    await users_collection.create_index(
+        "email",
+        unique=True,
+        partialFilterExpression={"email": {"$type": "string"}},
+    )
+    print("MongoDB users schema and indexes are ready.")
 
 
 async def close_mongo_connection() -> None:

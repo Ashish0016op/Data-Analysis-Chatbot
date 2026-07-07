@@ -28,7 +28,7 @@ interface AuthContextValue {
   loading: boolean
   error: string | null
   isAuthenticated: boolean
-  login: (username: string, password: string) => Promise<void>
+  login: (email: string, password: string) => Promise<void>
   logout: () => Promise<void>
   refresh: () => Promise<void>
 }
@@ -105,12 +105,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [refresh])
 
   const login = useCallback(
-    async (username: string, password: string) => {
+    async (email: string, password: string) => {
       setLoading(true)
       setError(null)
 
       try {
-        const payload = await backendLogin(username, password)
+        const payload = await backendLogin(email, password)
         setToken(getStoredToken())
         setUser(normalizeUser(payload))
         await refresh()
@@ -168,10 +168,10 @@ export function getUserDisplayName(user: BackendUser | null) {
   if (!user) return 'Not signed in'
 
   const value =
+    user.email ??
     user.username ??
     user.name ??
     user.full_name ??
-    user.email ??
     user.sub ??
     user.id ??
     'Signed in'

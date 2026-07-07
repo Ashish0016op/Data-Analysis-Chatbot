@@ -8,7 +8,7 @@ import { ApiError, register } from '@/lib/api'
 
 export default function RegisterPage() {
   const router = useRouter()
-  const [username, setUsername] = useState('')
+  const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
   const [error, setError] = useState<string | null>(null)
@@ -33,7 +33,7 @@ export default function RegisterPage() {
     setLoading(true)
 
     try {
-      await register({ username, password })
+      await register({ email, password })
       setMessage('Account created successfully. Redirecting to login...')
       setTimeout(() => router.push('/login'), 1500)
     } catch (err) {
@@ -80,15 +80,15 @@ export default function RegisterPage() {
 
           <form onSubmit={handleSubmit} className="space-y-4">
             <div className="space-y-2">
-              <label htmlFor="username" className="text-sm font-medium text-foreground">
-                Username
+              <label htmlFor="email" className="text-sm font-medium text-foreground">
+                Email
               </label>
               <input
-                id="username"
-                type="text"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                autoComplete="username"
+                id="email"
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                autoComplete="email"
                 required
                 className="w-full rounded-lg bg-white/5 border border-white/10 px-4 py-2.5 text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary/50 focus:ring-1 focus:ring-primary/30"
               />
@@ -126,7 +126,7 @@ export default function RegisterPage() {
 
             <button
               type="submit"
-              disabled={loading || !username || !password || !confirmPassword}
+              disabled={loading || !email || !password || !confirmPassword}
               className="w-full inline-flex items-center justify-center gap-2 rounded-lg bg-secondary/80 px-4 py-2.5 text-sm font-semibold text-secondary-foreground hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed transition"
             >
               <UserPlus size={16} />

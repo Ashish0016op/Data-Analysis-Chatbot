@@ -21,13 +21,23 @@ import uvicorn
 import json
 import io
 import re
+import hashlib
+import hmac
 import promptGuide
 import instructions
 import base64
+import secrets
 import time
 import threading
 from collections import deque
-from db import close_mongo_connection, get_mongo_status, ping_mongo
+from pymongo.errors import DuplicateKeyError, PyMongoError
+from db import (
+    close_mongo_connection,
+    ensure_mongo_schema,
+    get_mongo_status,
+    ping_mongo,
+    users_collection,
+)
 
 
 # Suppress specific warnings
@@ -152,7 +162,8 @@ MAX_HISTORY_LENGTH = 5
 
 @app.on_event("startup")
 async def startup_event():
-    await ping_mongo(raise_on_error=False)
+    if await ping_mongo(raise_on_error=False):
+        await ensure_mongo_schema()
 
 
 @app.on_event("shutdown")
@@ -170,14 +181,7 @@ async def mongo_health():
 SECRET_KEY               = "your_secret_key_here"
 ALGORITHM                = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
-
-dummy_users = [
-    {"username": "testadmin",  "password": "Admin@777", "role": "admin"},
-    {"username": "testuser",   "password": "User@777",  "role": "user"},
-    {"username": "testuser1",  "password": "User@111",  "role": "user"},
-    {"username": "testuser2",  "password": "User@222",  "role": "user"},
-    {"username": "testuser3",  "password": "User@333",  "role": "user"},
-]
+PASSWORD_HASH_ITERATIONS = 260_000
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
@@ -199,17 +203,17 @@ os.makedirs(IMAGES_FOLDER, exist_ok=True)
 # ─────────────────────────────────────────────
 
 class UserRegister(BaseModel):
-    username: str = Field(..., min_length=3, max_length=50, pattern=r"^[A-Za-z0-9_]+$")
+    email: str = Field(..., min_length=5, max_length=254, pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
     password: str = Field(..., min_length=4, max_length=128)
     role: Literal["user"] = "user"
 
-    @field_validator("username", mode="before")
+    @field_validator("email", mode="before")
     @classmethod
-    def normalize_username(cls, value: str) -> str:
-        return value.strip() if isinstance(value, str) else value
+    def normalize_email(cls, value: str) -> str:
+        return value.strip().lower() if isinstance(value, str) else value
 
 class UserResponse(BaseModel):
-    username: str
+    email: str
     role: str
 
 class Token(BaseModel):
@@ -224,11 +228,40 @@ class QueryRequest(BaseModel):
 # Auth Helpers
 # ─────────────────────────────────────────────
 
-def authenticate_user(username: str, password: str):
-    for user in dummy_users:
-        if user["username"] == username and user["password"] == password:
-            return user
-    return None
+def hash_password(password: str) -> str:
+    salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt.encode("utf-8"),
+        PASSWORD_HASH_ITERATIONS,
+    ).hex()
+    return f"pbkdf2_sha256${PASSWORD_HASH_ITERATIONS}${salt}${digest}"
+
+
+def verify_password(password: str, password_hash: str) -> bool:
+    try:
+        algorithm, iterations, salt, expected_digest = password_hash.split("$", 3)
+        if algorithm != "pbkdf2_sha256":
+            return False
+        actual_digest = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode("utf-8"),
+            salt.encode("utf-8"),
+            int(iterations),
+        ).hex()
+        return hmac.compare_digest(actual_digest, expected_digest)
+    except (TypeError, ValueError):
+        return False
+
+
+async def authenticate_user(email: str, password: str):
+    user = await users_collection.find_one({"email": email.strip().lower()})
+    if not user:
+        return None
+    if not verify_password(password, user.get("password_hash", "")):
+        return None
+    return user
 
 
 def create_access_token(data: dict, expires_delta: timedelta = None):
@@ -238,18 +271,23 @@ def create_access_token(data: dict, expires_delta: timedelta = None):
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 
-def get_current_user(token: str = Depends(oauth2_scheme)):
+async def get_current_user(token: str = Depends(oauth2_scheme)):
     try:
         payload   = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        username  = payload.get("sub")
+        email     = payload.get("sub")
         role      = payload.get("role")
-        if username is None:
+        if email is None:
             raise HTTPException(status_code=401, detail="Invalid token")
-        return {"username": username, "role": role}
+        user = await users_collection.find_one({"email": email})
+        if not user:
+            raise HTTPException(status_code=401, detail="User no longer exists")
+        return {"email": user["email"], "role": user.get("role", role or "user")}
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token expired")
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
+    except PyMongoError:
+        raise HTTPException(status_code=503, detail="MongoDB is unavailable")
 
 
 # ─────────────────────────────────────────────
@@ -903,12 +941,16 @@ data_router = APIRouter(tags=["data-analysis"])
 
 @auth_router.post("/login", response_model=Token)
 async def login(form_data: OAuth2PasswordRequestForm = Depends()):
-    user = authenticate_user(form_data.username, form_data.password)
+    try:
+        user = await authenticate_user(form_data.username.strip(), form_data.password)
+    except PyMongoError:
+        raise HTTPException(status_code=503, detail="MongoDB is unavailable")
+
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
-                            detail="Invalid username or password",
+                            detail="Invalid email or password",
                             headers={"WWW-Authenticate": "Bearer"})
-    token = create_access_token({"sub": user["username"], "role": user["role"]})
+    token = create_access_token({"sub": user["email"], "role": user.get("role", "user")})
     return {"access_token": token, "token_type": "bearer"}
 
 
@@ -919,12 +961,34 @@ async def read_current_user(current_user: dict = Depends(get_current_user)):
 
 @auth_router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 async def register(user: UserRegister):
-    for existing in dummy_users:
-        if existing["username"] == user.username:
-            raise HTTPException(status_code=400, detail="Username already exists")
-    new_user = {"username": user.username, "password": user.password, "role": user.role}
-    dummy_users.append(new_user)
-    return {"username": new_user["username"], "role": new_user["role"]}
+    now = datetime.utcnow()
+    new_user = {
+        "email": user.email,
+        "password_hash": hash_password(user.password),
+        "role": user.role,
+        "created_at": now,
+        "updated_at": now,
+    }
+
+    try:
+        existing_user = await users_collection.find_one({"email": user.email})
+        if existing_user:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Email is already registered",
+            )
+        await users_collection.insert_one(new_user)
+    except HTTPException:
+        raise
+    except DuplicateKeyError:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Email is already registered",
+        )
+    except PyMongoError:
+        raise HTTPException(status_code=503, detail="MongoDB is unavailable")
+
+    return {"email": new_user["email"], "role": new_user["role"]}
 
 
 @auth_router.post("/logout")
@@ -986,7 +1050,7 @@ async def query_data(request: QueryRequest, current_user: dict = Depends(get_cur
         'scatter', 'visualize', 'visualise', 'show chart', 'draw'
     ])
 
-    print(f"Query | user={current_user['username']} role={current_user['role']}")
+    print(f"Query | user={current_user['email']} role={current_user['role']}")
     print(
         f"Flags | table={is_table_request} list={is_list_request} "
         f"time={is_time_comparison} chart={is_chart_request}"
@@ -1018,7 +1082,7 @@ async def query_data(request: QueryRequest, current_user: dict = Depends(get_cur
         html_table = dataframe_to_html_table(result_df)
         markdown_table = result_df.to_markdown(index=False)
         response_text = f"{text_summary}\n\n{markdown_table}"
-        CHAT_HISTORY.append({"query": query, "response": text_summary, "user": current_user["username"]})
+        CHAT_HISTORY.append({"query": query, "response": text_summary, "user": current_user["email"]})
         if len(CHAT_HISTORY) > MAX_HISTORY_LENGTH:
             CHAT_HISTORY = CHAT_HISTORY[-MAX_HISTORY_LENGTH:]
         return build_response(response_text, combine_table_html(html_table, text_summary))
@@ -1031,7 +1095,7 @@ async def query_data(request: QueryRequest, current_user: dict = Depends(get_cur
         # empty_folder(IMAGES_FOLDER)
         success, summary = generate_chart_directly(query, DATA, IMAGES_FOLDER)
         if success:
-            CHAT_HISTORY.append({"query": query, "response": summary, "user": current_user["username"]})
+            CHAT_HISTORY.append({"query": query, "response": summary, "user": current_user["email"]})
             if len(CHAT_HISTORY) > MAX_HISTORY_LENGTH:
                 CHAT_HISTORY = CHAT_HISTORY[-MAX_HISTORY_LENGTH:]
             return build_response(summary)
@@ -1052,7 +1116,7 @@ async def query_data(request: QueryRequest, current_user: dict = Depends(get_cur
         is_image_present, _ = get_single_image_base64(IMAGES_FOLDER)
         if is_image_present:
             summary = response_text.strip() or f"Here is the chart for your query: {query}"
-            CHAT_HISTORY.append({"query": query, "response": summary, "user": current_user["username"]})
+            CHAT_HISTORY.append({"query": query, "response": summary, "user": current_user["email"]})
             if len(CHAT_HISTORY) > MAX_HISTORY_LENGTH:
                 CHAT_HISTORY = CHAT_HISTORY[-MAX_HISTORY_LENGTH:]
             return build_response(summary)
@@ -1069,7 +1133,7 @@ async def query_data(request: QueryRequest, current_user: dict = Depends(get_cur
             html_table   = dataframe_to_html_table(result_df)
             final_table  = remove_newlines_replace(html_table)
             final_result = replace_between_pipe_and_I(response_text, "\n" + final_table + "\n")
-            CHAT_HISTORY.append({"query": query, "response": text_summary, "user": current_user["username"]})
+            CHAT_HISTORY.append({"query": query, "response": text_summary, "user": current_user["email"]})
             if len(CHAT_HISTORY) > MAX_HISTORY_LENGTH:
                 CHAT_HISTORY = CHAT_HISTORY[-MAX_HISTORY_LENGTH:]
             return build_response(final_result, combine_table_html(html_table, text_summary))
@@ -1092,13 +1156,13 @@ async def query_data(request: QueryRequest, current_user: dict = Depends(get_cur
                         manual_df    = standardize_output_format(pd.DataFrame(data_rows, columns=header_cells))
                         text_summary = ensure_text_summary(response_text, manual_df, query, is_time_comparison)
                         html_table   = dataframe_to_html_table(manual_df)
-                        CHAT_HISTORY.append({"query": query, "response": text_summary, "user": current_user["username"]})
+                        CHAT_HISTORY.append({"query": query, "response": text_summary, "user": current_user["email"]})
                         if len(CHAT_HISTORY) > MAX_HISTORY_LENGTH:
                             CHAT_HISTORY = CHAT_HISTORY[-MAX_HISTORY_LENGTH:]
                         return build_response(text_summary, combine_table_html(html_table, text_summary))
 
         # Plain text / list
-        CHAT_HISTORY.append({"query": query, "response": response_text, "user": current_user["username"]})
+        CHAT_HISTORY.append({"query": query, "response": response_text, "user": current_user["email"]})
         if len(CHAT_HISTORY) > MAX_HISTORY_LENGTH:
             CHAT_HISTORY = CHAT_HISTORY[-MAX_HISTORY_LENGTH:]
         return build_response(response_text)
@@ -1126,8 +1190,8 @@ async def clear_chat(current_user: dict = Depends(get_current_user)):
         CHAT_HISTORY = []
         return {"message": "Chat history cleared."}
     else:
-        CHAT_HISTORY = [e for e in CHAT_HISTORY if e.get("user") != current_user["username"]]
-        return {"message": f"Chat history for {current_user['username']} cleared."}
+        CHAT_HISTORY = [e for e in CHAT_HISTORY if e.get("user") != current_user["email"]]
+        return {"message": f"Chat history for {current_user['email']} cleared."}
 
 
 # ─────────────────────────────────────────────
