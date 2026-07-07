@@ -1,0 +1,10 @@
+# Bade data files ko ignore karo
+*.csv
+data/
+backend/*.csv
+
+# Common Python/Node files jo GitHub pe nahi jaane chahiye
+__pycache__/
+venv/
+node_modules/
+.env

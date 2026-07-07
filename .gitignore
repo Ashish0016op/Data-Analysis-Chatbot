@@ -1,0 +1,23 @@
+# Bade CSV data files
+backend/*.csv
+backend/anonymized_sampled_data.csv
+backend/Warranty-Aperture for After 2025.csv
+
+# Environment variables (secrets)
+backend/.env
+
+# Python cache
+backend/__pycache__/
+**/__pycache__/
+
+# Node.js / Next.js
+frontend/node_modules/
+frontend/.next/
+frontend/tsconfig.tsbuildinfo
+
+# Backend generated folders
+backend/charts/
+backend/images/
+backend/interactive_charts/
+backend/scratch/
+backend/winscp_uploaded_ent_runnning/
