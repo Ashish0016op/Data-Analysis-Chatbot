@@ -206,25 +206,49 @@ export interface BackendQueryResult {
   raw: unknown
 }
 
+function extractEmbeddedHtmlBlocks(text: string) {
+  const htmlBlocks: string[] = []
+  const patterns = [
+    /<div\b[^>]*class=["'][^"']*\btable-responsive\b[^"']*["'][^>]*>[\s\S]*?<\/div>/gi,
+    /<table\b[\s\S]*?<\/table>/gi,
+  ]
+
+  let cleanedText = text
+
+  for (const pattern of patterns) {
+    cleanedText = cleanedText.replace(pattern, (match) => {
+      htmlBlocks.push(match)
+      return '\n'
+    })
+  }
+
+  return {
+    text: cleanedText.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim(),
+    htmlContent: htmlBlocks.length > 0 ? htmlBlocks.join('\n') : null,
+  }
+}
+
 export function parseBackendQueryResponse(payload: unknown): BackendQueryResult {
   if (payload === null || payload === undefined) {
     return { text: 'Backend returned an empty response.', chartHtml: null, imageFile: null, imageFiles: [], htmlContent: null, hasChart: false, raw: payload }
   }
 
   if (typeof payload !== 'object' || Array.isArray(payload)) {
+    const parsedText = extractEmbeddedHtmlBlocks(backendResponseToText(payload))
+
     return {
-      text: backendResponseToText(payload),
+      text: parsedText.text,
       chartHtml: null,
       imageFile: null,
       imageFiles: [],
-      htmlContent: null,
+      htmlContent: parsedText.htmlContent,
       hasChart: false,
       raw: payload,
     }
   }
 
   const data = payload as JsonRecord
-  const text = backendResponseToText(payload)
+  const parsedText = extractEmbeddedHtmlBlocks(backendResponseToText(payload))
   const chartHtml =
     typeof data.chart_html === 'string'
       ? data.chart_html
@@ -251,9 +275,10 @@ export function parseBackendQueryResponse(payload: unknown): BackendQueryResult 
       : typeof data.htmlContent === 'string'
         ? data.htmlContent
         : null
+  const finalHtmlContent = htmlContent ?? parsedText.htmlContent
   const hasChart = Boolean(data.is_images ?? data.isImages ?? chartHtml ?? imageFile ?? imageFiles.length > 0)
 
-  return { text, chartHtml, imageFile, imageFiles, htmlContent, hasChart, raw: payload }
+  return { text: parsedText.text, chartHtml, imageFile, imageFiles, htmlContent: finalHtmlContent, hasChart, raw: payload }
 }
 
 export async function queryBackend(prompt: string, context?: string) {

@@ -1,9 +1,10 @@
 'use client'
 
 import { useState } from 'react'
-import { BarChart3, TrendingUp, PieChart, Activity, Loader2, AlertCircle, Database, LineChart, ScatterChart, Eye } from 'lucide-react'
+import { Activity, AlertCircle, BarChart3, Database, Eye, Loader2, PieChart, ScatterChart, TrendingUp } from 'lucide-react'
+import { BackendResponse } from '@/components/BackendResponse'
 import { PageHeader } from '@/components/PageHeader'
-import { queryBackend, parseBackendQueryResponse } from '@/lib/api'
+import { queryBackend } from '@/lib/api'
 
 const actions = [
   { icon: BarChart3, label: 'Bar Charts', prompt: 'What are the best bar chart visualizations for this dataset? Include the specific columns and what insights each would reveal.' },
@@ -16,32 +17,24 @@ const actions = [
 
 export default function Visualizations() {
   const [queryInput, setQueryInput] = useState('')
-  const [result, setResult] = useState<string | null>(null)
-  const [chartHtml, setChartHtml] = useState<string | null>(null)
-  const [imageFile, setImageFile] = useState<string | null>(null)
-  const [imageFiles, setImageFiles] = useState<string[]>([])
-  const [htmlContent, setHtmlContent] = useState<string | null>(null)
+  const [responsePayload, setResponsePayload] = useState<unknown>(null)
+  const [hasResponse, setHasResponse] = useState(false)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const handleQuery = async (prompt?: string) => {
     const q = prompt || queryInput
     if (!q.trim() || loading) return
+
     setLoading(true)
     setError(null)
-    setResult(null)
-    setChartHtml(null)
-    setImageFile(null)
-    setImageFiles([])
-    setHtmlContent(null)
+    setHasResponse(false)
+    setResponsePayload(null)
+
     try {
       const payload = await queryBackend(q, 'visualizations')
-      const parsed = parseBackendQueryResponse(payload)
-      setResult(parsed.text)
-      setChartHtml(parsed.chartHtml)
-      setImageFile(parsed.imageFile)
-      setImageFiles(parsed.imageFiles)
-      setHtmlContent(parsed.htmlContent)
+      setResponsePayload(payload)
+      setHasResponse(true)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Visualization query failed')
     } finally {
@@ -107,57 +100,9 @@ export default function Visualizations() {
           </div>
         )}
 
-        {result && (
-          <div className="mt-6 space-y-6">
-            <div className="rounded-xl border border-white/10 bg-white/5 p-5 text-sm text-foreground whitespace-pre-wrap font-sans leading-relaxed">
-              {result}
-            </div>
-
-            {imageFiles && imageFiles.length > 0 && (
-              <div className="space-y-4">
-                {imageFiles.map((imgBase64, index) => (
-                  <div key={index} className="rounded-xl border border-white/10 bg-black/40 overflow-hidden shadow-2xl hover:border-primary/30 transition-all duration-300 group">
-                    <div className="border-b border-white/10 px-4 py-2.5 text-xs font-semibold uppercase tracking-wider text-primary/80 bg-white/5 flex items-center justify-between">
-                      <span>📊 Visualization {imageFiles.length > 1 ? `#${index + 1}` : ''}</span>
-                      <span className="text-[10px] text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity duration-300">Hover to expand</span>
-                    </div>
-                    <div className="p-4 flex justify-center bg-gradient-to-b from-white/[0.02] to-transparent overflow-hidden">
-                      <img
-                        src={`data:image/png;base64,${imgBase64}`}
-                        alt={`Generated Data Visualization ${index + 1}`}
-                        className="max-w-full h-auto rounded-lg shadow-md border border-white/10 transition-all duration-500 hover:scale-[1.03] cursor-zoom-in hover:shadow-primary/10 hover:shadow-2xl"
-                      />
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {chartHtml && !imageFile && (
-              <div className="rounded-xl border border-white/10 bg-black/20 overflow-hidden shadow-2xl">
-                <div className="border-b border-white/10 px-4 py-2.5 text-xs font-semibold uppercase tracking-wider text-primary/80 bg-white/5">
-                  📊 Visualization (SVG)
-                </div>
-                <div
-                  className="p-4 overflow-x-auto [&_img]:max-w-full [&_img]:h-auto [&_img]:rounded-lg [&_img]:border [&_img]:border-white/10"
-                  dangerouslySetInnerHTML={{
-                    __html: chartHtml.replace(/<image\b/gi, '<img'),
-                  }}
-                />
-              </div>
-            )}
-
-            {htmlContent && (
-              <div className="rounded-xl border border-white/10 bg-black/20 overflow-hidden shadow-2xl">
-                <div className="border-b border-white/10 px-4 py-2.5 text-xs font-semibold uppercase tracking-wider text-secondary/80 bg-white/5">
-                  📋 Tabular Data
-                </div>
-                <div
-                  className="p-4 overflow-x-auto text-xs [&_table]:w-full [&_table]:border-collapse [&_th]:border-b [&_th]:border-white/10 [&_th]:pb-2 [&_th]:text-left [&_th]:font-semibold [&_td]:py-2 [&_td]:border-b [&_td]:border-white/5 [&_tr:hover]:bg-white/5 transition-colors"
-                  dangerouslySetInnerHTML={{ __html: htmlContent }}
-                />
-              </div>
-            )}
+        {hasResponse && (
+          <div className="mt-6">
+            <BackendResponse payload={responsePayload} />
           </div>
         )}
       </div>

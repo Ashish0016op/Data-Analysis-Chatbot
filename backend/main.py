@@ -193,8 +193,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-CSV_FILE_PATH  = r"Warranty-Aperture for After 2025.csv"
-IMAGES_FOLDER  = "images"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CSV_FILE_PATH  = os.path.join(BASE_DIR, "Warranty-Aperture for After 2025.csv")
+IMAGES_FOLDER  = os.path.join(BASE_DIR, "images")
 os.makedirs(IMAGES_FOLDER, exist_ok=True)
 
 
@@ -332,13 +333,19 @@ def get_all_images_base64(folder_path: str) -> list:
 
 
 def empty_folder(folder_path: str):
+    folder_path = os.path.abspath(folder_path)
     if not os.path.isdir(folder_path):
+        os.makedirs(folder_path, exist_ok=True)
         return
+
+    removed = 0
     for file_name in os.listdir(folder_path):
         file_path = os.path.join(folder_path, file_name)
         if os.path.isfile(file_path):
             os.remove(file_path)
-    print(f"Emptied folder: {folder_path}")
+            removed += 1
+
+    print(f"Emptied folder: {folder_path} | removed files: {removed}")
 
 
 # ─────────────────────────────────────────────
@@ -425,6 +432,25 @@ def dataframe_to_html_table(df: pd.DataFrame) -> str:
         return f'<div class="table-responsive">\n\n\n{table_html}\n\n</div>'
     except Exception as e:
         return f"<p>Error generating table: {str(e)}</p>"
+
+
+def to_jsonable_value(value):
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+
+    if isinstance(value, (pd.Timestamp, datetime)):
+        return value.isoformat()
+
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except (TypeError, ValueError):
+            pass
+
+    return value
 
 
 def combine_table_html(table_html: str, title: str = "Data Analysis Results") -> str:
@@ -869,6 +895,8 @@ def generate_chart_directly(query: str, df: pd.DataFrame, images_folder: str) ->
     """
     import numpy as np
 
+    empty_folder(images_folder)
+
     columns_info = []
     for col in df.columns:
         dtype  = str(df[col].dtype)
@@ -1017,6 +1045,73 @@ async def rate_limit_status(current_user: dict = Depends(get_current_user)):
     }
 
 
+@data_router.get("/dataset-info")
+async def dataset_info(current_user: dict = Depends(get_current_user)):
+    global DATA
+
+    if DATA is None:
+        if not load_data():
+            raise HTTPException(status_code=400, detail="No data loaded.")
+
+    df = DATA
+    total_rows = int(len(df))
+    total_columns = int(len(df.columns))
+    missing_values = {
+        str(column): int(df[column].isna().sum())
+        for column in df.columns
+    }
+    column_details = []
+
+    for column in df.columns:
+        series = df[column]
+        null_count = int(series.isna().sum())
+        non_null_count = int(series.notna().sum())
+        detail = {
+            "column_name": str(column),
+            "dtype": str(series.dtype),
+            "non_null_count": non_null_count,
+            "null_count": null_count,
+            "null_percentage": round((null_count / total_rows * 100), 2) if total_rows else 0,
+            "unique_values": int(series.nunique(dropna=True)),
+            "sample_values": [
+                str(to_jsonable_value(value))
+                for value in series.dropna().drop_duplicates().head(5).tolist()
+            ],
+        }
+
+        if pd.api.types.is_numeric_dtype(series):
+            numeric = pd.to_numeric(series, errors="coerce")
+            stats = {
+                "min": numeric.min(),
+                "max": numeric.max(),
+                "mean": numeric.mean(),
+                "median": numeric.median(),
+                "std": numeric.std(),
+            }
+            for key, value in stats.items():
+                if pd.notna(value):
+                    detail[key] = float(value)
+
+        column_details.append(detail)
+
+    sample_data = [
+        {str(key): to_jsonable_value(value) for key, value in row.items()}
+        for row in df.head(10).to_dict(orient="records")
+    ]
+
+    return {
+        "total_datasets": 1,
+        "dataset_filename": os.path.basename(CSV_FILE_PATH),
+        "total_rows": total_rows,
+        "total_columns": total_columns,
+        "column_details": column_details,
+        "missing_values": missing_values,
+        "sample_data": sample_data,
+        "total_missing_values": int(sum(missing_values.values())),
+        "memory_usage_mb": round(float(df.memory_usage(deep=True).sum()) / (1024 * 1024), 2),
+    }
+
+
 # ─────────────────────────────────────────────
 # Query Endpoint
 # ─────────────────────────────────────────────
@@ -1031,6 +1126,7 @@ async def query_data(request: QueryRequest, current_user: dict = Depends(get_cur
 
     query = request.query
     query_lower = query.lower()
+    empty_folder(IMAGES_FOLDER)
 
     is_table_request = any(k in query_lower for k in [
         'table', 'tabular', 'columns', 'rows', 'dataframe'
@@ -1092,7 +1188,7 @@ async def query_data(request: QueryRequest, current_user: dict = Depends(get_cur
     # ─────────────────────────────────────────────
     if is_chart_request:
         print("[Chart] Bypassing agent — direct code execution")
-        # empty_folder(IMAGES_FOLDER)
+        empty_folder(IMAGES_FOLDER)
         success, summary = generate_chart_directly(query, DATA, IMAGES_FOLDER)
         if success:
             CHAT_HISTORY.append({"query": query, "response": summary, "user": current_user["email"]})
@@ -1171,7 +1267,6 @@ async def query_data(request: QueryRequest, current_user: dict = Depends(get_cur
         raise
     except Exception as e:
         print(f"Query processing error: {e}")
-        # empty_folder(IMAGES_FOLDER)
         return {
             "response": f"An error occurred: {str(e)}",
             "is_images": False,
