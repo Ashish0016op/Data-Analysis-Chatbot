@@ -9,6 +9,7 @@ backend/.env
 # Python cache
 backend/__pycache__/
 **/__pycache__/
+backend.zip
 
 # Node.js / Next.js
 frontend/node_modules/
