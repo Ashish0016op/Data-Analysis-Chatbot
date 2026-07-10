@@ -8,12 +8,23 @@ import { Navbar } from '@/components/Navbar'
 import { useAuth } from '@/components/AuthProvider'
 
 const AUTH_ROUTES = ['/login', '/register']
+const BASE_PATH = process.env.NEXT_PUBLIC_BASE_PATH?.replace(/\/$/, '') ?? ''
+
+function normalizePathname(pathname: string) {
+  const withoutBasePath =
+    BASE_PATH && (pathname === BASE_PATH || pathname.startsWith(`${BASE_PATH}/`))
+      ? pathname.slice(BASE_PATH.length) || '/'
+      : pathname
+
+  return withoutBasePath.replace(/\/+$/, '') || '/'
+}
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()
   const router = useRouter()
   const { isAuthenticated, loading } = useAuth()
-  const isAuthPage = AUTH_ROUTES.includes(pathname)
+  const currentPath = normalizePathname(pathname)
+  const isAuthPage = AUTH_ROUTES.includes(currentPath)
 
   useEffect(() => {
     if (!loading && !isAuthenticated && !isAuthPage) {
@@ -30,7 +41,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <div className="min-h-screen flex items-center justify-center bg-background text-muted-foreground">
         <div className="inline-flex items-center gap-3 text-sm">
           <Loader2 size={18} className="animate-spin text-primary" />
-          Checking session...
+          {loading ? 'Checking session...' : 'Redirecting to login...'}
         </div>
       </div>
     )
