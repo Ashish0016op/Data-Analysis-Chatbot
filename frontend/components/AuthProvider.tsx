@@ -66,7 +66,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const refresh = useCallback(async () => {
     setLoading(true)
     setError(null)
-    setToken(getStoredToken())
+    const storedToken = getStoredToken()
+    setToken(storedToken)
+
+    if (!storedToken) {
+      setUser(null)
+      setLoading(false)
+      return
+    }
 
     try {
       const payload = await getCurrentUser()

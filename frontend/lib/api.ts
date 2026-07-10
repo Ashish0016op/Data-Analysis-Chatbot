@@ -2,6 +2,7 @@ export const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/$/, '') ?? 'http://localhost:8000'
 
 const TOKEN_STORAGE_KEY = 'dap.backend.token'
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000
 
 type JsonRecord = Record<string, unknown>
 
@@ -20,6 +21,23 @@ export class ApiError extends Error {
     this.status = status
     this.payload = payload
   }
+}
+
+function createRequestSignal(signal?: AbortSignal) {
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => {
+    controller.abort()
+  }, DEFAULT_REQUEST_TIMEOUT_MS)
+
+  if (signal) {
+    if (signal.aborted) {
+      controller.abort()
+    } else {
+      signal.addEventListener('abort', () => controller.abort(), { once: true })
+    }
+  }
+
+  return { signal: controller.signal, timeoutId }
 }
 
 export function getStoredToken() {
@@ -93,6 +111,7 @@ export async function apiRequest<T = unknown>(path: string, options: RequestOpti
   const headers = new Headers(options.headers)
   const token = getStoredToken()
   const body = options.body
+  const { signal, timeoutId } = createRequestSignal(options.signal)
 
   headers.set('Accept', 'application/json')
 
@@ -106,23 +125,33 @@ export async function apiRequest<T = unknown>(path: string, options: RequestOpti
     headers.set('Content-Type', 'application/json')
   }
 
-  const response = await fetch(getEndpoint(path), {
-    ...options,
-    body: requestBody as BodyInit | undefined,
-    credentials: 'include',
-    headers,
-  })
-  const payload = await parseResponse(response)
+  try {
+    const response = await fetch(getEndpoint(path), {
+      ...options,
+      body: requestBody as BodyInit | undefined,
+      credentials: 'include',
+      headers,
+      signal,
+    })
+    const payload = await parseResponse(response)
 
-  if (!response.ok) {
-    throw new ApiError(
-      extractErrorMessage(payload, `Request failed with status ${response.status}`),
-      response.status,
-      payload,
-    )
+    if (!response.ok) {
+      throw new ApiError(
+        extractErrorMessage(payload, `Request failed with status ${response.status}`),
+        response.status,
+        payload,
+      )
+    }
+
+    return payload as T
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      throw new ApiError('Backend request timed out. Please try again.', 408)
+    }
+    throw error
+  } finally {
+    clearTimeout(timeoutId)
   }
-
-  return payload as T
 }
 
 function tokenFromPayload(payload: unknown) {
